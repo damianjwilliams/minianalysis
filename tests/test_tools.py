@@ -105,9 +105,65 @@ def test_cli_rejects_an_unknown_command():
     assert excinfo.value.code == 2
 
 
-def test_stem_matches_between_running_and_checking():
-    """run.py names its output files off a stem; check.py has to rebuild
-    exactly the same one, filtered or not, or it looks in the wrong place."""
-    from minianalysis.check import resolve_stem
-    assert resolve_stem("rec.abf", False, 3000.0, 10000.0) == "rec"
-    assert resolve_stem("rec.abf", True, 3000.0, 10000.0) == "rec_filt3000Hz10000Hz"
+def test_output_stem_distinguishes_runs_that_must_not_share_files():
+    """run.py names its output files off a stem and check.py rebuilds the
+    same one; two runs that describe different traces must not collide."""
+    from minianalysis.core import output_stem
+    assert output_stem("rec.abf") == "rec"
+    assert output_stem("rec.abf", channel=0) == "rec", "channel 0 keeps the plain name"
+    assert output_stem("rec.abf", channel=1) == "rec_ch1"
+    assert output_stem("rec.abf", filter_enabled=True, cutoff_hz=3000.0,
+                        target_rate_hz=10000.0) == "rec_filt3000Hz10000Hz"
+    assert output_stem("rec.abf", channel=1, filter_enabled=True, cutoff_hz=3000.0,
+                        target_rate_hz=10000.0) == "rec_ch1_filt3000Hz10000Hz"
+
+    # The bug this guards: analysing a second channel used to overwrite the
+    # first channel's events CSV, silently, with no warning.
+    assert output_stem("rec.abf", channel=0) != output_stem("rec.abf", channel=1)
+    # ...and a filtered run describes a different trace than a raw one, so
+    # its event indices mean something different.
+    assert output_stem("rec.abf") != output_stem("rec.abf", filter_enabled=True,
+                                                  cutoff_hz=3000.0, target_rate_hz=10000.0)
+
+
+def test_events_csv_round_trips_exactly(tmp_path):
+    """check.py rebuilds each event's detection windows from the baseline
+    and amplitude in the events CSV, so those numbers have to come back out
+    of the file bit for bit. pandas' default C float parser is NOT correctly
+    rounded and loses an ULP on a good fraction of cells (357 of 2292 on a
+    real 573-event recording), which is enough to move a drawn onset/decay
+    marker to a different sample than the detector actually measured."""
+    import pandas as pd
+    from minianalysis.core import events_frame
+
+    t, v = synthetic_trace(noise_sd=1.0)          # noise -> ugly, full-precision floats
+    events = detect_events(t, v, DT, DetectionParams())
+    assert events
+    df = events_frame(events)
+
+    csv = tmp_path / "rec_minianalysis_events.csv"
+    df.to_csv(csv, index=False)
+    back = pd.read_csv(csv, float_precision="round_trip")
+
+    for col in ["baseline", "amplitude", "area", "peak_time_s"]:
+        assert (back[col].to_numpy() == df[col].to_numpy()).all(), f"{col} did not survive the CSV"
+
+
+def test_geometry_matches_the_detector_after_a_csv_round_trip(tmp_path):
+    """The end-to-end version of the above: detect, write the CSV, read it
+    back the way check.py does, and confirm every redrawn window still lands
+    on the sample the detector measured."""
+    import pandas as pd
+    from minianalysis.core import events_frame
+
+    t, v = synthetic_trace(noise_sd=1.0)
+    params = DetectionParams()
+    events = detect_events(t, v, DT, params)
+    csv = tmp_path / "rec_minianalysis_events.csv"
+    events_frame(events).to_csv(csv, index=False)
+    back = pd.read_csv(csv, float_precision="round_trip")
+
+    for event, (_, row) in zip(events, back.iterrows()):
+        geo = _event_geometry(v, DT, int(row["peak_idx"]), row["baseline"], row["amplitude"], params)
+        assert (int(row["peak_idx"]) - geo["onset_idx"]) * DT * 1e3 == pytest.approx(event.rise_time_ms)
+        assert (geo["decay_idx"] - int(row["peak_idx"])) * DT * 1e3 == pytest.approx(event.decay_time_ms)

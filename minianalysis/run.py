@@ -12,10 +12,11 @@ over the whole trace, and writes the results next to the .abf:
     <stem>_minianalysis_params.json   the exact DetectionParams used
     <stem>_minianalysis_trace.png     whole trace with every event marked
 
-where <stem> is the .abf path without its extension, plus a
-`_filt<cutoff>Hz<rate>Hz` suffix when --filter was used. check.py reads the
-params sidecar back, so the windows it draws on an event are guaranteed to
-be the ones that actually produced it.
+where <stem> is the .abf path without its extension, plus `_ch<n>` for any
+channel other than 0 and `_filt<cutoff>Hz<rate>Hz` when --filter was used
+(see core.output_stem). check.py rebuilds the same stem to find these files
+again, and reads the params sidecar back, so the windows it draws on an
+event are guaranteed to be the ones that actually produced it.
 
 By default a modal dialog opens first, pre-filled with the 9 detection
 parameters plus the filter/resample settings, so they can be reviewed and
@@ -59,7 +60,7 @@ import matplotlib.pyplot as plt
 from .core import (
     PARAM_FIELD_SPECS, DetectionParams, _samples, autocorrelation_histogram, column_statistics,
     cross_correlation_histogram, cumulative_histogram, detect_events, events_frame,
-    extract_event_traces, fit_exponential_decay, frequency_histogram, scale_traces,
+    extract_event_traces, fit_exponential_decay, frequency_histogram, output_stem, scale_traces,
 )
 from .gui_utils import FILTER_FIELD_SPECS, make_field_widget, read_field_widget
 from .preprocess import (
@@ -328,9 +329,7 @@ def main(argv=None):
 
     events = detect_events(t, v, dt, params)
 
-    stem = os.path.splitext(args.abf)[0]
-    if args.filter:
-        stem += f"_filt{int(args.cutoff_hz)}Hz{int(args.target_rate_hz)}Hz"
+    stem = output_stem(args.abf, args.channel, args.filter, args.cutoff_hz, args.target_rate_hz)
     out_csv = f"{stem}_minianalysis_events.csv"
     df = events_frame(events)  # adds inter_event_interval_ms
     df.to_csv(out_csv, index=False)

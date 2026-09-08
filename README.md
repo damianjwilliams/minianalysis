@@ -118,8 +118,12 @@ trace and writes, next to the `.abf`:
 | `<stem>_minianalysis_params.json` | the exact parameters used — read back by `check` |
 | `<stem>_minianalysis_trace.png` | the whole trace with every event marked |
 
-`<stem>` is the `.abf` path without its extension, plus `_filt<cutoff>Hz<rate>Hz`
-when `--filter` was used.
+`<stem>` is the `.abf` path without its extension, plus `_ch<n>` for any
+channel other than 0, plus `_filt<cutoff>Hz<rate>Hz` when `--filter` was used.
+Anything that makes two runs describe *different data* — a different channel,
+a different filter setting — puts them in different files, so a second run
+can't quietly overwrite the first. `check` rebuilds the same stem from the
+same flags to find them again.
 
 Optional analysis flags run the tutorial's downstream analyses on the events
 just detected:
@@ -179,10 +183,13 @@ Filtered runs also warn if your amplitude threshold is small relative to the
 filtered trace's noise floor — thresholds tuned on a raw trace don't transfer,
 because filtering correlates adjacent noise samples.
 
-> **The filter settings must match between detecting and checking.** Event
-> positions are sample indices into whatever trace the detector saw. Run with
-> `--filter` and you must check with the same `--filter` settings, or every
-> event lands in the wrong place. `launch.py` passes them through for you.
+> **The filter settings (and `--channel`) must match between detecting and
+> checking.** Event positions are sample indices into whatever trace the
+> detector saw. Run with `--filter` and you must check with the same
+> `--filter` settings, or every event lands in the wrong place. In practice
+> this is self-enforcing: the settings are part of the output filename, so a
+> mismatched `check` reports that it can't find an events CSV rather than
+> showing you something wrong. `launch.py` passes them through for you.
 
 `preprocess` can also be used on its own to produce a filtered `.npz` plus a
 before/after preview plot:
@@ -317,8 +324,9 @@ pytest
 
 The suite plants events of known amplitude, tau and timing in a synthetic trace
 and checks the detector recovers them, that each threshold and search window
-rejects what it should, and that the two GUI tools' duplicated per-candidate
-math still agrees with `detect_events` exactly. The GUI tests need no display —
+rejects what it should, that the two GUI tools' duplicated per-candidate math
+still agrees with `detect_events` exactly, and that an event survives the round
+trip out to CSV and back without moving. The GUI tests need no display —
 they only exercise the math, and skip entirely if PyQt5 isn't installed.
 
 ## Credit

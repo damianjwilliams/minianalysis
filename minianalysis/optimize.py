@@ -74,7 +74,7 @@ from .check import (
     COLOR_ONSET_WINDOW, COLOR_PEAK, EVENTS_SUFFIX, PARAMS_SUFFIX, _LABEL_BBOX, _load_params,
 )
 from .core import (
-    PARAM_FIELD_SPECS, DetectionParams, _samples, detect_events, events_frame,
+    PARAM_FIELD_SPECS, DetectionParams, _samples, detect_events, events_frame, output_stem,
 )
 from .gui_utils import make_field_widget, read_field_widget, safe_callback
 from .preprocess import (
@@ -422,11 +422,13 @@ class FilterPanel(QtWidgets.QWidget):
 
 class OptimizerWindow(QtWidgets.QMainWindow):
     def __init__(self, raw_t: np.ndarray, raw_v: np.ndarray, raw_dt: float, y_unit: str,
-                 initial_params: DetectionParams, abf_path: str, filter_info: dict):
+                 initial_params: DetectionParams, abf_path: str, filter_info: dict,
+                 channel: int = 0):
         super().__init__()
         self.raw_t, self.raw_v, self.raw_dt = raw_t, raw_v, raw_dt
         self.y_unit = y_unit
         self.abf_path = abf_path
+        self.channel = channel
         self.filter_info = dict(filter_info)
         self.t, self.v, self.dt = self._compute_filtered_trace(self.filter_info)
 
@@ -665,9 +667,8 @@ class OptimizerWindow(QtWidgets.QMainWindow):
             events = detect_events(self.t, self.v, self.dt, params)
             df = events_frame(events)
 
-            stem = os.path.splitext(self.abf_path)[0]
-            if self.filter_info.get("enabled"):
-                stem += f"_filt{int(self.filter_info['cutoff_hz'])}Hz{int(self.filter_info['target_rate_hz'])}Hz"
+            stem = output_stem(self.abf_path, self.channel, self.filter_info.get("enabled"),
+                                self.filter_info["cutoff_hz"], self.filter_info["target_rate_hz"])
             out_csv = f"{stem}{EVENTS_SUFFIX}"
             df.to_csv(out_csv, index=False)
             params_path = f"{stem}{PARAMS_SUFFIX}"
@@ -716,7 +717,7 @@ def main(argv=None):
                    help=f"only with --filter: initial Bessel filter order (default {DEFAULT_ORDER})")
     args = p.parse_args(argv)
 
-    stem = os.path.splitext(args.abf)[0]
+    stem = output_stem(args.abf, args.channel, args.filter, args.cutoff_hz, args.target_rate_hz)
     overrides = dict(
         direction=args.direction, amplitude_threshold=args.amplitude_threshold,
         area_threshold=args.area_threshold, n_avg_peak=args.n_avg_peak,
@@ -747,7 +748,8 @@ def main(argv=None):
                   f"{hardware_filter_hz:.0f} Hz, at or below the requested {args.cutoff_hz:.0f} Hz.")
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = OptimizerWindow(raw_t, raw_v, raw_dt, y_unit, params, args.abf, filter_info)
+    window = OptimizerWindow(raw_t, raw_v, raw_dt, y_unit, params, args.abf, filter_info,
+                              channel=args.channel)
     window.show()
     app.exec_()
 

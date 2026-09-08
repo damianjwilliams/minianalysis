@@ -73,6 +73,7 @@ any of the three GUIs without dragging a plotting backend along.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -91,7 +92,7 @@ __all__ = [
     "ColumnStatistics", "column_statistics", "frequency_histogram", "cumulative_histogram",
     "running_average", "autocorrelation_histogram", "cross_correlation_histogram",
     "extract_event_traces", "scale_traces", "DecayFit", "fit_exponential_decay",
-    "PARAM_FIELD_SPECS",
+    "PARAM_FIELD_SPECS", "output_stem",
 ]
 
 
@@ -663,3 +664,41 @@ PARAM_FIELD_SPECS = [
     ("onset_search_ms", "Period to search onset before peak, ms", "double", dict(minimum=0.01, maximum=100000.0, decimals=2, singleStep=0.5)),
     ("adjust_overlapping_baseline", "Adjust baseline for overlapping events", "bool", dict()),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Output naming, in one place. run.py writes the events CSV/params sidecar/
+# plots, optimize.py's "Run full detection" button writes the first two, and
+# check.py has to find all of them again later -- so the rule for turning a
+# recording into a filename prefix lives here, where all three can import it
+# without pulling in matplotlib or Qt.
+# ---------------------------------------------------------------------------
+
+def output_stem(abf_path: str, channel: int = 0, filter_enabled: bool = False,
+                 cutoff_hz: float = 0.0, target_rate_hz: float = 0.0) -> str:
+    """The prefix every output file for this run hangs off: the .abf path
+    without its extension, plus what makes this run distinguishable from
+    another on the same recording.
+
+    Channel is included only when it isn't 0. That asymmetry is deliberate:
+    channel 0 is the overwhelmingly common case and its filenames predate
+    this, so leaving them unsuffixed keeps every already-analysed recording
+    findable -- while a second channel no longer silently overwrites the
+    first. On a dual-channel recording (a primary current channel plus a
+    secondary voltage monitor, say) analysing channel 1 used to clobber
+    channel 0's events CSV with no warning at all.
+
+    Filter settings are included when filtering is on, because event
+    positions are sample indices into the filtered/resampled trace: a
+    filtered run and a raw run of the same recording describe different
+    traces and must not share an output file.
+
+    Pure string logic, no file I/O, so callers can build paths (and fail
+    fast on a missing input) before doing any expensive loading.
+    """
+    stem = os.path.splitext(abf_path)[0]
+    if channel:
+        stem += f"_ch{channel}"
+    if filter_enabled:
+        stem += f"_filt{int(cutoff_hz)}Hz{int(target_rate_hz)}Hz"
+    return stem

@@ -87,7 +87,7 @@ from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtWidgets
 
-from .core import DetectionParams, _samples
+from .core import DetectionParams, _samples, output_stem
 from .gui_utils import safe_callback
 from .preprocess import (
     DEFAULT_CUTOFF_HZ, DEFAULT_ORDER, DEFAULT_TARGET_RATE_HZ, get_hardware_filter_hz,
@@ -100,7 +100,8 @@ from .style import GRID, INK, MUTED, SURFACE, TRACE
 # PARAMS_SUFFIX, and this module both reads those and writes the two QC
 # files beside them. All five hang off the same <stem> (the .abf path
 # without its extension, plus a _filt<cutoff>Hz<rate>Hz suffix when the run
-# was filtered -- see resolve_stem).
+# was filtered, and _ch<n> for a channel other than 0 -- see
+# core.output_stem).
 EVENTS_SUFFIX = "_minianalysis_events.csv"
 PARAMS_SUFFIX = "_minianalysis_params.json"
 REVIEWED_SUFFIX = "_minianalysis_reviewed.csv"
@@ -142,11 +143,11 @@ def _event_geometry(v: np.ndarray, dt: float, peak_idx: int, baseline: float, am
 
     Deliberately takes `baseline`/`amplitude` from the event's own CSV row
     rather than recomputing them: those are the exact (possibly
-    overlap-adjusted, see minianalysis._overlap_adjusted_baseline) values
-    actually used at detection time, and re-deriving them here without that
-    same sequential state could silently disagree with what really produced
-    this event. Only the WINDOW GEOMETRY is recomputed -- purely a function
-    of peak_idx/params, safe to redo standalone.
+    overlap-adjusted, see core._overlap_adjusted_baseline) values actually
+    used at detection time, and re-deriving them here without that same
+    sequential state could silently disagree with what really produced this
+    event. Only the WINDOW GEOMETRY is recomputed -- purely a function of
+    peak_idx/params, safe to redo standalone.
     """
     pol = -1.0 if params.direction == "negative" else 1.0
     before_n = _samples(params.baseline_before_ms, dt)
@@ -161,9 +162,19 @@ def _event_geometry(v: np.ndarray, dt: float, peak_idx: int, baseline: float, am
     p0 = max(0, peak_idx - n_avg_peak // 2)
     p1 = min(len(v), p0 + n_avg_peak)
 
-    peak_v = baseline + amplitude
-    s_baseline, s_peak = pol * baseline, pol * peak_v
-    span = s_peak - s_baseline
+    # span == pol * amplitude EXACTLY, in both directions -- written that
+    # way rather than as the more obvious pol * (baseline + amplitude) -
+    # pol * baseline. detect_events computes span as (pol * peak_v) -
+    # (pol * baseline) and amplitude as peak_v - baseline; multiplying by
+    # +-1.0 is exact and IEEE subtraction is antisymmetric, so this form
+    # agrees with it bit for bit, while rebuilding peak_v from baseline +
+    # amplitude rounds once more than it has to. The onset/decay levels
+    # below are fractions of this span, and a level an ULP away from a
+    # sample sitting right at it picks a different crossing sample -- so
+    # this is the cheap way to guarantee the markers land where the
+    # detector actually measured, rather than merely usually landing there.
+    s_baseline = pol * baseline
+    span = pol * amplitude
     sv = pol * v
 
     # Mirrors detect_events' own onset search exactly (peak_idx -
@@ -701,7 +712,7 @@ def load_display_trace(abf_path: str, channel: int, filter_flag: bool, cutoff_hz
     """Load (t, v, dt, y_unit) -- the raw trace, or the same Bessel-filtered
     + resampled one run.py's own --filter produces, if filter_flag. Callers
     resolve the stem (and so can fail fast on a missing CSV) via
-    resolve_stem BEFORE calling this, so no time is spent filtering a
+    core.output_stem BEFORE calling this, so no time is spent filtering a
     multi-million-sample trace for a run that was never going to find its
     events file. A raw-vs-filtered mismatch between detection and checking
     silently misaligns every event, so this deliberately shares its
@@ -728,18 +739,6 @@ def load_display_trace(abf_path: str, channel: int, filter_flag: bool, cutoff_hz
     return t, v, dt, y_unit
 
 
-
-
-def resolve_stem(abf_path: str, filter_flag: bool, cutoff_hz: float, target_rate_hz: float) -> str:
-    """The `stem` every output path hangs off -- pure string logic, no file
-    I/O, so a missing events CSV can be caught (and reported) before the
-    potentially-expensive Bessel-filter/downsample in load_display_trace
-    below ever runs. Must stay identical to run.py's own stem logic, since
-    that's what named the files this tool is looking for."""
-    stem = os.path.splitext(abf_path)[0]
-    if filter_flag:
-        stem += f"_filt{int(cutoff_hz)}Hz{int(target_rate_hz)}Hz"
-    return stem
 
 
 def main(argv=None):
@@ -782,7 +781,11 @@ def main(argv=None):
                    help=f"only with --filter: Bessel filter order (default {DEFAULT_ORDER})")
     args = p.parse_args(argv)
 
-    stem = resolve_stem(args.abf, args.filter, args.cutoff_hz, args.target_rate_hz)
+    # Same stem the run that produced these files built (core.output_stem
+    # is shared with run.py and optimize.py precisely so this can't drift).
+    # Resolved before load_display_trace below, so a missing events CSV is
+    # reported instantly instead of after filtering a huge trace.
+    stem = output_stem(args.abf, args.channel, args.filter, args.cutoff_hz, args.target_rate_hz)
     csv_path = args.csv or f"{stem}{EVENTS_SUFFIX}"
     if not os.path.exists(csv_path):
         p.error(f"events CSV not found: {csv_path!r} (run `python -m minianalysis run {args.abf}"
@@ -791,7 +794,16 @@ def main(argv=None):
     t, v, dt, y_unit = load_display_trace(args.abf, args.channel, args.filter, args.cutoff_hz,
                                            args.target_rate_hz, args.filter_order)
 
-    df = pd.read_csv(csv_path)
+    # float_precision="round_trip", not the default: pandas' fast C float
+    # parser is not correctly rounded, so a baseline/amplitude written at
+    # full precision by run.py comes back an ULP or two off (357 of 2292
+    # numeric cells, on a real 573-event recording). Every window this tool
+    # draws is derived from those two numbers, and a level that lands an ULP
+    # away from a sample sitting right at it moves the onset/decay marker to
+    # a different sample -- i.e. the tool would draw something the detector
+    # did not do, on exactly the marginal events an operator looks at
+    # hardest. Reading exactly what was written costs nothing here.
+    df = pd.read_csv(csv_path, float_precision="round_trip")
     if df.empty:
         p.error("no events in that CSV")
 
