@@ -36,4 +36,4 @@ filter settings have to match between detecting and checking).
 """
 
 __all__ = ["cli", "core"]
-__version__ = "1.0.0"
+__version__ = "1.1.0"

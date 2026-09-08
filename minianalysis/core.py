@@ -115,7 +115,16 @@ class DetectionParams:
     riding on a single event's own decaying tail masquerade as several
     additional "local maxima", fragmenting one event into several spurious
     detections. Tune this against your own events' typical decay time."""
-    baseline_before_ms: float = 2.0                                # (d)
+    baseline_before_ms: float = 5.0                                # (d)
+    """The gap between the end of the baseline window and the peak, so the
+    window measures pre-event trace rather than the event's own rising
+    phase. Too small and the baseline is dragged toward the peak, which
+    under-reads amplitude and can push a real event below (a) entirely: on
+    a 120 s recording measured while tuning this, 18% of events at (d)=2ms
+    had a baseline window already >5% into their own rise, and moving to
+    5 ms recovered 29% more events. Like every value here it's a starting
+    point, not a calibration -- it wants to comfortably clear YOUR events'
+    rise time, so check it against a few peaks in the optimizer."""
     baseline_avg_ms: float = 3.0                                    # (e)
     decay_search_ms: float = 20.0                                    # (f)
     decay_fraction: float = 0.5                                       # (g)

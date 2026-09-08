@@ -173,8 +173,11 @@ def main(argv=None):
                    help="(c) period to search for a local maximum, in ms (default 3 -- should be "
                         "at least comparable to your events' decay duration, or a single event's "
                         "noisy tail can fragment into multiple spurious detections)")
-    p.add_argument("--baseline-before-ms", type=float, default=2.0,
-                   help="(d) time before the peak where the baseline window ends, in ms (default 2)")
+    p.add_argument("--baseline-before-ms", type=float, default=5.0,
+                   help="(d) time before the peak where the baseline window ends, in ms (default 5 "
+                        "-- big enough to clear a typical event's rising phase, so the baseline "
+                        "isn't measured partway into the event itself; shorten it if your events "
+                        "rise faster than that)")
     p.add_argument("--baseline-avg-ms", type=float, default=3.0,
                    help="(e) duration of the baseline-averaging window, in ms (default 3)")
     p.add_argument("--decay-search-ms", type=float, default=20.0,

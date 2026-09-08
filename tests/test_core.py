@@ -244,3 +244,61 @@ def test_double_exponential_fit_is_at_least_as_good_as_a_single_one():
     one = fit_exponential_decay(t_ms, avg, n_exp=1)
     two = fit_exponential_decay(t_ms, avg, n_exp=2)
     assert two.residual_sd <= one.residual_sd * 1.5  # more parameters shouldn't fit much worse
+
+
+# ---------------------------------------------------------------------------
+# the defaults themselves
+# ---------------------------------------------------------------------------
+
+def test_the_cli_and_the_dataclass_agree_on_every_default():
+    """run.py declares its argparse defaults separately from
+    DetectionParams, so the two can silently drift apart -- and when they
+    do, the CLI quietly wins and `run` stops matching what a script calling
+    detect_events(...) with default params would produce."""
+    import argparse
+    from unittest import mock
+
+    from minianalysis import run
+
+    captured = {}
+    real_parse = argparse.ArgumentParser.parse_args
+
+    def capture(self, *args, **kwargs):
+        captured["defaults"] = {a.dest: a.default for a in self._actions}
+        raise SystemExit(0)   # stop before run.main() does any real work
+
+    with mock.patch.object(argparse.ArgumentParser, "parse_args", capture), pytest.raises(SystemExit):
+        run.main(["dummy.abf"])
+    assert real_parse is not None  # (kept only to make the patch's scope obvious)
+
+    defaults = captured["defaults"]
+    params = DetectionParams()
+    for field in ["amplitude_threshold", "area_threshold", "direction", "n_avg_peak",
+                  "search_local_max_ms", "baseline_before_ms", "baseline_avg_ms",
+                  "decay_search_ms", "decay_fraction", "onset_fraction", "onset_search_ms"]:
+        assert defaults[field] == getattr(params, field), (
+            f"--{field.replace('_', '-')} defaults to {defaults[field]!r} on the command line "
+            f"but {getattr(params, field)!r} in DetectionParams")
+
+
+def test_baseline_window_clears_a_typical_rise_by_default():
+    """(d) exists to keep the baseline window off the event's own rising
+    phase. Pin the default against a rise slower than this fixture's, since
+    a too-small (d) fails silently: it just under-reads every amplitude."""
+    params = DetectionParams()
+    assert params.baseline_before_ms >= 4.0
+
+    # A 3 ms rise -- slower than most sEPSCs, and longer than the old 2 ms
+    # default -- must still leave the baseline window entirely on pre-event
+    # trace, so the measured amplitude matches the planted one.
+    global RISE_MS
+    original, RISE_MS = RISE_MS, 3.0
+    try:
+        t, v = synthetic_trace()
+        events = detect_events(t, v, DT, DetectionParams(n_avg_peak=1))
+        assert len(events) == len(EVENT_TIMES_S)
+        assert np.allclose([e.amplitude for e in events], AMPLITUDE_PA, rtol=0.02)
+        assert np.allclose([e.baseline for e in events], 0.0, atol=0.01), \
+            "baseline window should sit on flat pre-event trace, not on the rise"
+    finally:
+        RISE_MS = original

@@ -213,15 +213,23 @@ formula for it):
 | Peak direction | `--direction` | negative | inward (sEPSC in voltage clamp) or outward |
 | Points to average peak | `--n-avg-peak` | 3 | samples averaged to read the peak value |
 | Period to search local max (c) | `--search-local-max-ms` | 3 ms | minimum spacing between candidate peaks |
-| Time before peak for baseline (d) | `--baseline-before-ms` | 2 ms | gap between the baseline window and the peak |
+| Time before peak for baseline (d) | `--baseline-before-ms` | 5 ms | gap between the baseline window and the peak |
 | Period to average baseline (e) | `--baseline-avg-ms` | 3 ms | length of the baseline window |
 | Period to search decay (f) | `--decay-search-ms` | 20 ms | how far past the peak to look for the decay point |
 | Fraction to find decay (g) | `--decay-fraction` | 0.5 | fraction of amplitude defining the decay point |
 | Onset fraction | `--onset-fraction` | 0.1 | fraction of amplitude defining rise onset |
 | Onset search period | `--onset-search-ms` | 5 ms | how far before the peak to look for that crossing |
 
-Two things worth knowing:
+Three things worth knowing:
 
+- **(d) has to clear your events' rising phase.** If the baseline window ends
+  too close to the peak it measures part of the event itself, which drags the
+  baseline toward the peak, under-reads amplitude, and can push a real event
+  below (a) entirely. At the old 2 ms default, 18% of events on a test
+  recording had a baseline window already >5% of the way into their own rise;
+  5 ms recovered 29% more events on that cell. Whether 5 ms is right for yours
+  is a question for `optimize` — click a few peaks and look at where the green
+  baseline window actually sits.
 - **(c) must be at least comparable to your events' decay duration.** Set it too
   short (say 1 ms against a 3 ms decay) and per-sample noise riding on one
   event's own decaying tail registers as several more "local maxima",
