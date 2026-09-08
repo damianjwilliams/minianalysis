@@ -1,0 +1,18 @@
+# Everything the three steps need. Install with:
+#     pip install -r requirements.txt
+#
+# Only the first five are needed to DETECT events in a script or a batch job
+# (`python -m minianalysis run recording.abf --no-gui`). PyQt5 and pyqtgraph
+# are for the interactive windows -- the parameter dialog, the optimizer and
+# the event checker -- and are imported lazily where possible, so a headless
+# machine can still run detection without them.
+
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+pyabf>=2.3.8
+matplotlib>=3.7
+
+# interactive windows only (optimize / check / launch / the run dialog)
+PyQt5>=5.15
+pyqtgraph>=0.13

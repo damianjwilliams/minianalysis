@@ -1,0 +1,35 @@
+# Environments
+.venv/
+venv/
+.conda/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / tooling
+.vscode/
+.idea/
+.claude/
+
+# Recordings and analysis output -- per-experiment data, not code
+*.abf
+*_minianalysis_events.csv
+*_minianalysis_params.json
+*_minianalysis_reviewed.csv
+*_minianalysis_review_progress.csv
+*_minianalysis_stats.csv
+*_minianalysis_hist_*.csv
+*_minianalysis_autocorr.csv
+*_minianalysis_crosscorr.csv
+*_minianalysis_decayfit.txt
+*_minianalysis_*.png
+*_filtered_*.npz
+*_filtered_*_preview.png

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minianalysis"
+version = "1.0.0"
+description = "Mini-Analysis-style synaptic event detection for gap-free voltage-clamp .abf recordings, with interactive parameter tuning and event checking"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["electrophysiology", "patch-clamp", "sEPSC", "mEPSC", "abf", "pyabf", "event detection"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+# Detection itself needs only these; the interactive windows add PyQt5/pyqtgraph
+# (see the [project.optional-dependencies] "gui" extra below and requirements.txt).
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "pyabf>=2.3.8",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15", "pyqtgraph>=0.13"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+minianalysis = "minianalysis.cli:main"
+
+[tool.setuptools]
+packages = ["minianalysis"]
