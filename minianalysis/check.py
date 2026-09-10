@@ -107,6 +107,22 @@ PARAMS_SUFFIX = "_minianalysis_params.json"
 REVIEWED_SUFFIX = "_minianalysis_reviewed.csv"
 PROGRESS_SUFFIX = "_minianalysis_review_progress.csv"
 
+# Which detector's output to review (--source). Each entry is the
+# (events, params, reviewed, progress) suffixes, all hanging off the same
+# core.output_stem, so every detector gets its own QC files and none can
+# clobber another's. The window itself is detector-agnostic: it redraws each
+# event's baseline/onset/decay windows from the CSV's own baseline+amplitude
+# columns via _event_geometry, which is why one reviewer serves both.
+SOURCES = {
+    "minianalysis": (EVENTS_SUFFIX, PARAMS_SUFFIX, REVIEWED_SUFFIX, PROGRESS_SUFFIX),
+    "deconv": ("_deconv_events.csv", "_deconv_params.json",
+               "_deconv_reviewed.csv", "_deconv_review_progress.csv"),
+}
+SOURCE_LABELS = {
+    "minianalysis": "Mini Analysis event checker",
+    "deconv": "Deconvolution event checker",
+}
+
 # Built directly on a PyQt5 QApplication/QMainWindow via matplotlib's Qt
 # Figure/FigureCanvas, NOT pyplot's own mainloop: pyplot's backend is a
 # single global, and run.py deliberately forces the non-interactive "Agg"
@@ -117,15 +133,31 @@ PROGRESS_SUFFIX = "_minianalysis_review_progress.csv"
 OVERVIEW_MAX_POINTS = 200_000  # stride-decimated for display speed only; detail view always uses full-res data
 
 
-def _load_params(params_json: str | None, stem: str, overrides: dict) -> DetectionParams:
+def _load_params(params_json: str | None, stem: str, overrides: dict,
+                  params_suffix: str = PARAMS_SUFFIX) -> DetectionParams:
     """Sidecar JSON (if present) as the base, with any explicitly-passed
     CLI flags (non-None in `overrides`) applied on top -- see module
-    docstring."""
-    path = params_json or f"{stem}{PARAMS_SUFFIX}"
+    docstring.
+
+    Unknown keys are IGNORED rather than fatal. A detector other than the
+    classical one writes its own parameters plus run diagnostics into its
+    sidecar, and only the measurement fields (direction, n_avg_peak, the
+    baseline/onset/decay windows and fractions) are shared with
+    DetectionParams -- those are the only ones this window draws from.
+    Anything DetectionParams does not define falls back to its default.
+    """
+    path = params_json or f"{stem}{params_suffix}"
     if os.path.exists(path):
         with open(path) as fh:
-            base = DetectionParams(**json.load(fh))
+            raw = json.load(fh)
+        known = {f.name for f in dataclasses.fields(DetectionParams)}
+        ignored = sorted(set(raw) - known)
+        base = DetectionParams(**{k: val for k, val in raw.items() if k in known})
         print(f"Loaded detection parameters -> {path}")
+        if ignored:
+            shown = ", ".join(ignored[:6]) + (", ..." if len(ignored) > 6 else "")
+            print(f"  ({len(ignored)} key(s) there are not detection parameters "
+                  f"and were ignored: {shown})")
     else:
         base = DetectionParams()
         print(f"No params sidecar found ({path}) -- using DetectionParams() defaults "
@@ -216,8 +248,31 @@ PARAM_LINES = [
 ]
 
 
-def params_text(params: DetectionParams) -> str:
-    return "\n".join(f"{label}: {getattr(params, field)}{unit}" for label, field, unit in PARAM_LINES)
+# The classical detector's accept/reject criteria. A different detector does
+# not apply these, so the panel must not claim it did -- see params_text.
+CLASSICAL_ONLY_FIELDS = {"amplitude_threshold", "area_threshold", "search_local_max_ms"}
+
+
+def params_text(params: DetectionParams, show_thresholds: bool = True,
+                extra: str = "") -> str:
+    """The parameter panel's text.
+
+    `show_thresholds=False` drops the lines the classical detector uses to
+    ACCEPT or REJECT a candidate -- amplitude (a), area (b) and the local-max
+    search span (c). Those fields still exist on DetectionParams and still
+    hold their defaults, but a detector that never consulted them would be
+    misrepresented by a panel listing them: an operator reading
+    "Amplitude threshold (a): 5.0" would reasonably conclude every event
+    shown had cleared 5 pA.  The measurement windows (d, e, f, g, onset) are
+    shared by both detectors, so those are always shown.
+
+    `extra` is appended verbatim, for a source to state its own criteria.
+    """
+    shown = [(label, field, unit) for label, field, unit in PARAM_LINES
+             if show_thresholds or field not in CLASSICAL_ONLY_FIELDS]
+    text = "\n".join(f"{label}: {getattr(params, field)}{unit}"
+                     for label, field, unit in shown)
+    return f"{text}\n{extra}" if extra else text
 
 
 # Colors used consistently between plot_event_detail's annotations and
@@ -253,32 +308,54 @@ COLOR_ACCEPTED = "#2a8f2a"
 COLOR_REJECTED = "#c0392b"
 
 
-def build_legend_handles():
+def build_legend_handles(show_thresholds: bool = True):
     """Proxy artists explaining every annotation plot_event_detail draws --
     the 'key' shown once in the inspector window, built here so its colors
-    can never drift out of sync with the trace annotations themselves."""
+    can never drift out of sync with the trace annotations themselves.
+
+    `show_thresholds=False` drops the three entries that describe classical
+    accept/reject machinery -- the (c) local-max span, the (a) amplitude
+    threshold, and the (b) area PASS/FAIL fills. plot_event_detail does not
+    draw those for a detector that never applied them, and a key listing
+    annotations absent from the plot is worse than no key.
+    """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    return [
+    items = [
         (Patch(fc=COLOR_BASELINE_WINDOW, alpha=0.35), "Baseline averaging window (e)"),
         (Line2D([], [], color=COLOR_BASELINE_LINE, ls="--", lw=1.2), "Baseline level used"),
         (Patch(fc=COLOR_BEFORE_PEAK, alpha=0.35), "Time before peak for baseline (d)"),
-        (Line2D([], [], color=COLOR_LOCAL_MAX, lw=1.2, marker=">", ms=5), "Local-max search span (c)"),
+    ]
+    if show_thresholds:
+        items.append((Line2D([], [], color=COLOR_LOCAL_MAX, lw=1.2, marker=">", ms=5),
+                      "Local-max search span (c)"))
+    items += [
         (Line2D([], [], color=COLOR_ONSET_WINDOW, ls="--", lw=1.4), "Onset search window boundary"),
         (Line2D([], [], color=COLOR_PEAK, marker="x", ls="None", mew=2, ms=9), "Detected peak"),
         (Patch(fc=COLOR_PEAK, alpha=0.15), "Peak-averaging window (n points)"),
-        (Line2D([], [], color=COLOR_AMPLITUDE, lw=1.2, marker=">", ms=5), "Amplitude threshold (a)"),
+    ]
+    if show_thresholds:
+        items.append((Line2D([], [], color=COLOR_AMPLITUDE, lw=1.2, marker=">", ms=5),
+                      "Amplitude threshold (a)"))
+    items += [
         (Patch(fc=COLOR_DECAY_WINDOW, alpha=0.35), "Decay search window (f)"),
         (Line2D([], [], color=COLOR_DECAY_LEVEL, ls=":", lw=1.4), "Decay-fraction level (g)"),
         (Line2D([], [], color=COLOR_ONSET, marker="o", ls="None", ms=6), "Onset (rise crossing)"),
         (Line2D([], [], color=COLOR_DECAY_LEVEL, marker="o", ls="None", ms=6), "Decay point"),
-        (Patch(fc=COLOR_AREA_PASS, alpha=0.35), "Measured area -- PASS (b)"),
-        (Patch(fc=COLOR_AREA_FAIL, alpha=0.35), "Measured area -- FAIL (b)"),
     ]
+    if show_thresholds:
+        items += [
+            (Patch(fc=COLOR_AREA_PASS, alpha=0.35), "Measured area -- PASS (b)"),
+            (Patch(fc=COLOR_AREA_FAIL, alpha=0.35), "Measured area -- FAIL (b)"),
+        ]
+    else:
+        items.append((Patch(fc=COLOR_AREA_PASS, alpha=0.35), "Measured area"))
+    return items
 
 
 def plot_event_detail(ax, t: np.ndarray, v: np.ndarray, dt: float, row: pd.Series,
-                       params: DetectionParams, y_unit: str, pre_ms: float, post_ms: float):
+                       params: DetectionParams, y_unit: str, pre_ms: float, post_ms: float,
+                       show_thresholds: bool = True):
     """Draw one detected event with every detection-parameter window/
     threshold annotated on it -- the interactive counterpart of
     this_method.pdf p.2's "Detection Parameters" diagram, but on the real
@@ -313,13 +390,18 @@ def plot_event_detail(ax, t: np.ndarray, v: np.ndarray, dt: float, row: pd.Serie
     # fill would just muddy them. (See the annotation key for what this is.)
     ax.axvline(rel(geo["onset_search_start"]), color=COLOR_ONSET_WINDOW, ls="--", lw=1.4, zorder=2)
 
-    # (c) illustrative local-maximum search span, centered on the peak
-    y_c = baseline + sign * 0.08 * abs(amplitude if amplitude else 1.0)
-    x_c_lo, x_c_hi = rel(geo["local_max_lo"]), rel(geo["local_max_hi"])
-    ax.annotate("", xy=(x_c_lo, y_c), xytext=(x_c_hi, y_c),
-                arrowprops=dict(arrowstyle="<->", color=COLOR_LOCAL_MAX, lw=1.4))
-    ax.text((x_c_lo + x_c_hi) / 2, y_c, "(c)", color=COLOR_LOCAL_MAX, fontsize=9, fontweight="bold",
-             ha="center", va="bottom", bbox=_LABEL_BBOX, zorder=6)
+    # (c) illustrative local-maximum search span, centered on the peak.
+    # Classical-only: it comes from search_local_max_ms, which is the window
+    # find_peaks(distance=...) used to pick candidates. A detector that found
+    # its candidates another way never applied it, so drawing it would imply
+    # a constraint that was not there.
+    if show_thresholds:
+        y_c = baseline + sign * 0.08 * abs(amplitude if amplitude else 1.0)
+        x_c_lo, x_c_hi = rel(geo["local_max_lo"]), rel(geo["local_max_hi"])
+        ax.annotate("", xy=(x_c_lo, y_c), xytext=(x_c_hi, y_c),
+                    arrowprops=dict(arrowstyle="<->", color=COLOR_LOCAL_MAX, lw=1.4))
+        ax.text((x_c_lo + x_c_hi) / 2, y_c, "(c)", color=COLOR_LOCAL_MAX, fontsize=9,
+                fontweight="bold", ha="center", va="bottom", bbox=_LABEL_BBOX, zorder=6)
 
     # peak marker + n_avg_peak averaging window
     ax.plot(0, peak_v, "x", color=COLOR_PEAK, ms=10, mew=2, zorder=5)
@@ -327,13 +409,15 @@ def plot_event_detail(ax, t: np.ndarray, v: np.ndarray, dt: float, row: pd.Serie
 
     # (a) amplitude threshold, drawn as a bracket from baseline
     thresh_v = baseline + sign * params.amplitude_threshold
-    x_a = t_ms[0] * 0.5
-    ax.annotate("", xy=(x_a, baseline), xytext=(x_a, thresh_v),
-                arrowprops=dict(arrowstyle="<->", color=COLOR_AMPLITUDE, lw=1.4))
-    ax.text(x_a, (baseline + thresh_v) / 2, f" a={params.amplitude_threshold}", color=COLOR_AMPLITUDE,
-             fontsize=9, fontweight="bold", va="center", ha="left", bbox=_LABEL_BBOX, zorder=6)
     pass_amp = abs(amplitude) >= params.amplitude_threshold
-    ax.axhline(thresh_v, color=COLOR_AMPLITUDE, ls=":", lw=1.0, zorder=1)
+    if show_thresholds:
+        x_a = t_ms[0] * 0.5
+        ax.annotate("", xy=(x_a, baseline), xytext=(x_a, thresh_v),
+                    arrowprops=dict(arrowstyle="<->", color=COLOR_AMPLITUDE, lw=1.4))
+        ax.text(x_a, (baseline + thresh_v) / 2, f" a={params.amplitude_threshold}",
+                color=COLOR_AMPLITUDE, fontsize=9, fontweight="bold", va="center",
+                ha="left", bbox=_LABEL_BBOX, zorder=6)
+        ax.axhline(thresh_v, color=COLOR_AMPLITUDE, ls=":", lw=1.0, zorder=1)
 
     # (f) decay-search window, (g) decay-fraction level, onset/decay markers
     ax.axvspan(rel(peak_idx), rel(geo["decay_search_end"]), color=COLOR_DECAY_WINDOW, alpha=0.20, zorder=1)
@@ -364,12 +448,54 @@ def plot_event_detail(ax, t: np.ndarray, v: np.ndarray, dt: float, row: pd.Serie
     ax.tick_params(colors=MUTED)
     ax.grid(alpha=0.15, color=GRID)
 
-    verdict = f"amp {'PASS' if pass_amp else 'FAIL'} / area {'PASS' if area_ok else 'FAIL'}"
-    ax.set_title(
-        f"t={row['peak_time_s']:.3f}s   amplitude={amplitude:.2f} {y_unit} (thr {params.amplitude_threshold})   "
-        f"area={row['area']:.2f} (thr {params.area_threshold})   [{verdict}]",
-        color=INK, fontsize=10,
-    )
+    if show_thresholds:
+        verdict = f"amp {'PASS' if pass_amp else 'FAIL'} / area {'PASS' if area_ok else 'FAIL'}"
+        title = (f"t={row['peak_time_s']:.3f}s   amplitude={amplitude:.2f} {y_unit} "
+                 f"(thr {params.amplitude_threshold})   "
+                 f"area={row['area']:.2f} (thr {params.area_threshold})   [{verdict}]")
+    else:
+        # This detector applied no amplitude/area threshold, so report the
+        # measurements without a pass/fail verdict against one that was never
+        # checked. Kinetics go here instead -- they are what an operator
+        # actually judges a deconvolution candidate on.
+        rise = row.get("rise_time_ms", float("nan"))
+        decay = row.get("decay_time_ms", float("nan"))
+        title = (f"t={row['peak_time_s']:.3f}s   amplitude={amplitude:.2f} {y_unit}   "
+                 f"area={row['area']:.2f}   rise={rise:.2f} ms   decay={decay:.2f} ms")
+    ax.set_title(title, color=INK, fontsize=10)
+
+
+def _source_criteria_text(source: str, params_path: str) -> str:
+    """The criteria a non-classical detector actually applied, for the panel.
+
+    The shared DetectionParams fields cover how each event was MEASURED, but
+    not what made it an event in the first place. Rather than leave that blank
+    (or worse, let the classical amplitude/area defaults stand in for it),
+    read the source's own sidecar and state its real thresholds.
+    """
+    if source == "minianalysis" or not os.path.exists(params_path):
+        return ""
+    try:
+        with open(params_path) as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    if source != "deconv":
+        return ""
+    rows = [
+        ("Threshold", f"{raw.get('thresh_sd', '?')} SD of deconvolved trace"),
+        ("Min amplitude", f"{raw.get('min_amp_sd', '?')} SD of raw trace"),
+    ]
+    if raw.get("min_amp_pa"):
+        rows.append(("Absolute floor", f"{raw['min_amp_pa']} (trace units)"))
+    if raw.get("noise_sd") is not None:
+        rows.append(("Noise SD", f"{raw['noise_sd']:.2f}"))
+        rows.append(("4 SD limit", f"{raw.get('detection_limit_4sd', 0.0):.2f}"))
+    if raw.get("kernel_ms") is not None:
+        rows.append(("Kernel", f"{raw['kernel_ms']:.1f} ms, {raw.get('kernel_source', '?')}"
+                               f" ({raw.get('n_isolated_for_kernel', '?')} isolated)"))
+    body = "\n".join(f"{k}: {v}" for k, v in rows)
+    return "\nDeconvolution criteria\n" + "-" * 26 + "\n" + body
 
 
 def _load_prior_decisions(reviewed_path: str, progress_path: str) -> dict:
@@ -393,8 +519,13 @@ class EventInspector(QtWidgets.QMainWindow):
 
     def __init__(self, t: np.ndarray, v: np.ndarray, dt: float, df: pd.DataFrame,
                  params: DetectionParams, y_unit: str, title: str, pre_ms: float, post_ms: float,
-                 reviewed_path: str, progress_path: str):
+                 reviewed_path: str, progress_path: str,
+                 show_thresholds: bool = True, extra_param_text: str = ""):
         super().__init__()
+        # False when reviewing a detector with no amplitude/area threshold to
+        # pass or fail; see params_text and plot_event_detail.
+        self.show_thresholds = show_thresholds
+        self.extra_param_text = extra_param_text
         self.t, self.v, self.dt = t, v, dt
         self.reviewed_path, self.progress_path = reviewed_path, progress_path
         self.decisions: dict = _load_prior_decisions(reviewed_path, progress_path)
@@ -509,16 +640,26 @@ class EventInspector(QtWidgets.QMainWindow):
         # at this font size -- 8 lines used to fit under the old y=0.60/0.42
         # split, but the 9th (onset_search_ms) made the box tall enough to
         # overlap the legend below it.
-        sidebar_body = "Detection parameters\n" + "-" * 26 + "\n" + params_text(params)
+        sidebar_body = "Detection parameters\n" + "-" * 26 + "\n" + params_text(params, self.show_thresholds, self.extra_param_text)
         self.param_text = self.figure.text(
             SIDEBAR_X, 0.97, sidebar_body,
             transform=self.figure.transFigure, ha="left", va="top", fontsize=9,
             family="monospace", color=INK,
             bbox=dict(boxstyle="round,pad=0.5", fc="#f2f1ea", ec=MUTED, alpha=0.95))
 
-        key_handles, key_labels = zip(*build_legend_handles())
+        # Anchor the key BELOW whatever the parameter box actually occupies,
+        # rather than at a fixed y. The box's height depends on the source (a
+        # non-classical detector adds its own criteria block), and a hard-coded
+        # anchor is exactly what put the 9th parameter line under the legend
+        # once already -- see the note above. 0.0245 per line at fontsize 9,
+        # plus the box's own padding, measured to reproduce the previous 0.68
+        # for the classical detector's 11 lines.
+        n_lines = sidebar_body.count("\n") + 1
+        key_y = 0.97 - n_lines * 0.0245 - 0.03
+
+        key_handles, key_labels = zip(*build_legend_handles(self.show_thresholds))
         self.figure.legend(
-            key_handles, key_labels, loc="upper left", bbox_to_anchor=(SIDEBAR_X, 0.68),
+            key_handles, key_labels, loc="upper left", bbox_to_anchor=(SIDEBAR_X, key_y),
             bbox_transform=self.figure.transFigure, fontsize=8.5, labelcolor=INK,
             title="Annotation key", title_fontsize=9.5, frameon=True,
             facecolor="#f2f1ea", edgecolor=MUTED, framealpha=0.95, handlelength=1.8)
@@ -536,7 +677,8 @@ class EventInspector(QtWidgets.QMainWindow):
         row = self.df.iloc[self.idx]
         self.selected_marker.set_data([row["peak_time_s"]], [self.v[int(row["peak_idx"])]])
         plot_event_detail(self.ax_detail, self.t, self.v, self.dt, row, self.params,
-                           self.y_unit, self.pre_ms, self.post_ms)
+                           self.y_unit, self.pre_ms, self.post_ms,
+                           show_thresholds=self.show_thresholds)
 
         peak_idx = int(row["peak_idx"])
         qc = self.decisions.get(peak_idx)
@@ -745,10 +887,18 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("abf", help="Path to the gap-free voltage-clamp .abf file")
     p.add_argument("--channel", type=int, default=0)
+    p.add_argument("--source", choices=sorted(SOURCES), default="minianalysis",
+                   help="which detector's events to review: 'minianalysis' (the "
+                        "classical threshold detector, from `run`) or 'deconv' "
+                        "(the deconvolution detector, from `deconvolve`). Each "
+                        "keeps its own reviewed/progress CSVs, so reviewing one "
+                        "never touches the other's decisions.")
     p.add_argument("--csv", default=None,
-                   help=f"Path to the events CSV (default: <stem>{EVENTS_SUFFIX})")
+                   help="Path to the events CSV (default: <stem> + the chosen "
+                        "--source's events suffix)")
     p.add_argument("--params-json", default=None,
-                   help=f"Path to the params sidecar (default: <stem>{PARAMS_SUFFIX})")
+                   help="Path to the params sidecar (default: <stem> + the chosen "
+                        "--source's params suffix)")
     p.add_argument("--pre-ms", type=float, default=None,
                    help="detail-view window before the peak, ms (default: auto, from the baseline "
                         "parameters with 3 ms headroom)")
@@ -786,10 +936,19 @@ def main(argv=None):
     # Resolved before load_display_trace below, so a missing events CSV is
     # reported instantly instead of after filtering a huge trace.
     stem = output_stem(args.abf, args.channel, args.filter, args.cutoff_hz, args.target_rate_hz)
-    csv_path = args.csv or f"{stem}{EVENTS_SUFFIX}"
+    events_suffix, params_suffix, reviewed_suffix, progress_suffix = SOURCES[args.source]
+    csv_path = args.csv or f"{stem}{events_suffix}"
     if not os.path.exists(csv_path):
-        p.error(f"events CSV not found: {csv_path!r} (run `python -m minianalysis run {args.abf}"
-                f"{' --filter' if args.filter else ''}` first, or pass --csv)")
+        # Name the command that produces THIS source's CSV, including the
+        # filtering flag, since the stem encodes it and a mismatch is the
+        # usual reason the file "isn't there".
+        if args.source == "deconv":
+            hint = (f"python -m minianalysis deconvolve {args.abf}"
+                    f"{'' if args.filter else ' --no-filter'}")
+        else:
+            hint = (f"python -m minianalysis run {args.abf}"
+                    f"{' --filter' if args.filter else ''}")
+        p.error(f"events CSV not found: {csv_path!r} (run `{hint}` first, or pass --csv)")
 
     t, v, dt, y_unit = load_display_trace(args.abf, args.channel, args.filter, args.cutoff_hz,
                                            args.target_rate_hz, args.filter_order)
@@ -815,12 +974,12 @@ def main(argv=None):
         decay_fraction=args.decay_fraction, onset_fraction=args.onset_fraction,
         onset_search_ms=args.onset_search_ms,
     )
-    params = _load_params(args.params_json, stem, overrides)
+    params = _load_params(args.params_json, stem, overrides, params_suffix)
     pre_ms = args.pre_ms if args.pre_ms is not None else params.baseline_before_ms + params.baseline_avg_ms + 3.0
     post_ms = args.post_ms if args.post_ms is not None else params.decay_search_ms + 3.0
 
-    reviewed_path = f"{stem}{REVIEWED_SUFFIX}"
-    progress_path = f"{stem}{PROGRESS_SUFFIX}"
+    reviewed_path = f"{stem}{reviewed_suffix}"
+    progress_path = f"{stem}{progress_suffix}"
 
     print(f"{len(df)} events from {os.path.basename(csv_path)}", flush=True)
     print("Click a red X in the top panel to inspect that event, or use Right/N, Left/P to step. "
@@ -831,9 +990,12 @@ def main(argv=None):
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = EventInspector(t, v, dt, df, params, y_unit,
-                             title=f"Mini Analysis event checker -- {os.path.basename(args.abf)}",
+                             title=f"{SOURCE_LABELS[args.source]} -- {os.path.basename(args.abf)}",
                              pre_ms=pre_ms, post_ms=post_ms,
-                             reviewed_path=reviewed_path, progress_path=progress_path)
+                             reviewed_path=reviewed_path, progress_path=progress_path,
+                             show_thresholds=(args.source == "minianalysis"),
+                             extra_param_text=_source_criteria_text(
+                                 args.source, args.params_json or f"{stem}{params_suffix}"))
     window.show()
     app.exec_()
 
