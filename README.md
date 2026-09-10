@@ -1,19 +1,40 @@
 # minianalysis
 
 Synaptic event detection for gap-free voltage-clamp `.abf` recordings
-(pCLAMP/Clampex, read with [pyabf](https://pypi.org/project/pyabf/)), using the
-classical local-maximum + baseline + amplitude/area-threshold method from the
-Synaptosoft **Mini Analysis Program** — plus the two tools you actually need
-around a detector: one to *tune* its parameters against your own recording, and
-one to *check* every event it found.
-
-Three steps, in the order you'd use them:
+(pCLAMP/Clampex, read with [pyabf](https://pypi.org/project/pyabf/)) — with
+**two independent detectors** and the tools you actually need around them: one
+to *tune* parameters against your own recording, and one to *check* every event
+that was found.
 
 | Step | Command | What it does |
 |---|---|---|
 | **optimize** | `python optimize_params.py rec.abf` | Live three-panel window: edit a parameter, click a peak, see it measured — and see *why* it would be rejected, if it would be |
-| **run** | `python run_detection.py rec.abf` | Scan the whole trace, write the events CSV, a sidecar recording the exact parameters used, and a whole-trace plot |
-| **check** | `python check_events.py rec.abf` | Click any detected event to see every detection window and threshold drawn on its own trace; accept or reject it |
+| **run** | `python run_detection.py rec.abf` | The classical detector. Scan the whole trace, write the events CSV, a sidecar recording the exact parameters used, and a whole-trace plot |
+| **deconvolve** | `python detect_deconv.py rec.abf` | The other detector. Estimates the event waveform from the recording, deconvolves the trace by it, and detects on the result — no thresholds to tune |
+| **check** | `python check_events.py rec.abf` | Click any detected event to see every window and threshold drawn on its own trace; accept or reject it. `--source deconv` reviews the other detector's events |
+
+### Two detectors, and when to use which
+
+**`run`** is the classical method from the Synaptosoft **Mini Analysis
+Program**: local maxima, a baseline window before each peak, and
+amplitude/area thresholds. It is fully explainable — every accept or reject
+traces to a parameter you set — which is exactly why `optimize` and `check`
+are built around it.
+
+**`deconvolve`** implements Pernía-Andrade et al. 2012 and targets two
+failure modes of the classical method that are structural rather than tuning
+problems: `find_peaks` keeps only the tallest peak per search window, so a
+small event beside a large one is never a candidate; and the fixed baseline
+window lands on the previous event's decay tail at short inter-event
+intervals. Deconvolving with the event kernel collapses each event to a sharp
+impulse, which separates summating events and removes the decay tail that
+otherwise gets reported as several events. On a planted-event benchmark it
+scores mean F1 **0.947 vs 0.734** and wins all 22 conditions
+(`python detect_deconv.py --benchmark`) — but read the caveats in
+[its own section](#deconvolve) before trusting that on your own recordings.
+
+They write separate files and are reviewed separately, so you can run both on
+one recording and compare.
 
 Everything is self-contained: no other repository, model file, or second
 environment is needed.
@@ -49,6 +70,8 @@ numpy/scipy/pandas/pyabf/matplotlib, so batch jobs work on a headless machine.
 
 ## Quick start
 
+With the classical detector:
+
 ```bash
 # 1. Tune the parameters against a peak you can see with your own eyes
 python optimize_params.py recording.abf
@@ -60,23 +83,41 @@ python run_detection.py recording.abf
 python check_events.py recording.abf
 ```
 
+Or with the deconvolution detector, which has nothing to tune — so there is no
+step 1:
+
+```bash
+# 1. Detect (filters at 3 kHz / 10 kHz by default; --no-filter opts out)
+python detect_deconv.py recording.abf --plot
+
+# 2. Check what it found
+python check_events.py recording.abf --source deconv --filter
+```
+
+That `--filter` is not optional bookkeeping: the filter settings go into the
+output filename, and event positions are sample indices into whatever trace
+the detector saw, so the checker has to rebuild the same one.
+
 Prefer one window that does the choosing for you? `python launch.py` asks for a
-recording, a step and the filter settings, then runs it — and can open the
-checker automatically when the run finishes.
+recording, a step and the filter settings, then runs it — and after a detection
+run it opens the event checker on that detector's events automatically, in a
+window that shows the run's output as it happens.
 
 Every step is also a subcommand, if you'd rather type one name:
 
 ```bash
 python -m minianalysis optimize recording.abf
 python -m minianalysis run recording.abf --no-gui --amplitude-threshold 8
-python -m minianalysis check recording.abf
-python -m minianalysis --help          # all commands
-python -m minianalysis run --help      # one command's own options
+python -m minianalysis deconvolve recording.abf
+python -m minianalysis deconvolve --benchmark      # the two detectors, head to head
+python -m minianalysis check recording.abf --source deconv
+python -m minianalysis --help                      # all commands
+python -m minianalysis run --help                  # one command's own options
 ```
 
 ---
 
-## The three steps in detail
+## The steps in detail
 
 ### `optimize` — tune the parameters
 
@@ -137,6 +178,91 @@ python -m minianalysis run rec.abf --no-gui \
     --fit-decay peak_to_end            # single/double exponential decay fit (Nelder-Mead simplex)
 ```
 
+<a id="deconvolve"></a>
+
+### `deconvolve` — detect without thresholds
+
+```bash
+python detect_deconv.py recording.abf --plot
+python -m minianalysis deconvolve recording.abf --no-filter   # raw trace
+```
+
+Three stages, none of which need a parameter tuned by hand:
+
+1. **Estimate the kernel.** Average the well-isolated events in *this*
+   recording, normalise to unit peak, and truncate at 8× the 1/e decay. No
+   time constant is assumed — this matters more than anything else here.
+   Assuming 6 ms on 25 ms data drops precision to 0.51.
+2. **Deconvolve.** Wiener deconvolution by that kernel, so each event becomes
+   a sharp impulse. Peaks are taken at 6 SD of the *deconvolved* trace.
+3. **Clean up.** A matching-pursuit pass accepts candidates largest-first and
+   subtracts each accepted kernel from the residual, so a noise bump riding on
+   an accepted event's decay tail has no amplitude left and is dropped. Each
+   event is then measured on a trace with all *other* events' kernels removed,
+   so a neighbour's decay cannot contaminate its baseline.
+
+Every threshold is in units of the recording's own measured noise, so there is
+nothing to re-tune per cell.
+
+**Output:** `<stem>_deconv_events.csv` (same 8 columns as the classical
+detector, so anything reading one reads the other), `<stem>_deconv_params.json`,
+`<stem>_deconv_kernel.csv`, and `<stem>_deconv_trace.png` with `--plot`.
+
+**Preprocessing differs from the other steps.** This one filters at 3 kHz and
+resamples to 10 kHz **by default**, matching `preprocess.py`; pass
+`--no-filter` to work on the raw trace. The other steps are opt-*in* with
+`--filter`.
+
+#### The benchmark, and what it does and doesn't show
+
+```bash
+python detect_deconv.py --benchmark        # through the default 3 kHz / 10 kHz
+python detect_deconv.py --benchmark-raw    # unfiltered
+```
+
+22 planted-event conditions spanning decay τ 3–60 ms, event rate 1–40 Hz,
+white and 1/f noise, baseline drift, and amplitudes from SNR 15 down to 3:
+
+| | deconvolution | classical |
+|---|---|---|
+| mean F1 | **0.947** | 0.734 |
+| worst F1 | **0.694** | 0.498 |
+| conditions won | **22 / 22** | 0 / 22 |
+
+The classical detector is given its *best* amplitude threshold for each
+condition, chosen against the ground truth it would not have in practice, and
+still loses every one. Precision is 1.000 in 15 of the 22.
+
+Three things that table does **not** show, all of which matter:
+
+- **The events are biexponential and this detector estimates its kernel from
+  the data**, so the benchmark is kinder to it than to a fixed-template
+  method. Treat the margin as indicative, not as a measured advantage on your
+  recordings.
+- **On real recordings it is markedly more conservative.** On one test file it
+  found 722 events where the classical detector found 1073–2116 depending on
+  threshold. There is no ground truth to adjudicate that — which is what
+  `check --source deconv` is for. Review before trusting a count.
+- **Slow events are its weak spot.** Kernel estimation averages events that
+  nothing else comes within `--kernel-isolation-ms` (60 ms) of. Once decay τ
+  exceeds ~25 ms at a normal event rate nothing is genuinely isolated, and the
+  estimated kernel length becomes unstable — measured 28–116 ms on the same
+  τ = 60 ms data depending only on recording duration, with F1 swinging
+  0.80–0.93. It still beats the classical detector throughout that range, but
+  raise `--kernel-isolation-ms` (and `--detrend-win-ms` with it) if your events
+  are slow. The CLI warns, with a suggested value, when the estimate looks
+  unreliable.
+
+The recall floor at SNR ≈ 3 is not a defect: it is the noise-limited detection
+limit described by [Greger & Watson
+2025](https://physoc.onlinelibrary.wiley.com/doi/full/10.1113/JP288183), who
+show that pushing sensitivity below it makes amplitude changes read as
+frequency changes. `--min-amp-pa` enforces that limit explicitly if you want it
+hard rather than implicit; the run reports the measured σ and the 4σ limit
+either way.
+
+---
+
 ### `check` — verify and curate
 
 Click any event and see, drawn on its own trace, every window and threshold the
@@ -160,6 +286,30 @@ decision, and picked back up automatically next time:
 Events you haven't decided on don't appear in the progress file — they aren't
 "rejected" by default.
 
+#### Reviewing either detector — `--source`
+
+```bash
+python check_events.py rec.abf                              # classical (default)
+python check_events.py rec.abf --source deconv --filter     # deconvolution
+```
+
+Each detector owns four filenames — events, params, reviewed, progress — and
+**no suffix is shared**, so accepting or rejecting one detector's events never
+touches the decisions you made on the other. You can run both on one recording
+and review each independently.
+
+The window is the same either way, because it rebuilds each event's windows
+from the CSV's own `baseline` + `amplitude` columns. What changes is what it
+*claims*: the classical detector's amplitude (a), area (b) and local-max (c)
+parameters are accept/reject criteria that the deconvolution detector never
+applies, so for `--source deconv` they are dropped from the sidebar rather than
+shown at their defaults, the `(a)` bracket and `(c)` span aren't drawn, and the
+event title reports amplitude/area/rise/decay with **no PASS/FAIL verdict**
+against a threshold that was never checked. In their place the sidebar lists
+that detector's real criteria, read from its own sidecar — deconvolved-trace
+threshold, minimum amplitude in noise SDs, the measured σ and 4σ detection
+limit, and the kernel's length and provenance.
+
 **Controls:** click a red X to inspect it · `←`/`→` or `P`/`N` to step ·
 `A`/`↑` accept · `R`/`↓` reject · scroll to zoom the overview (Ctrl = time only,
 Shift = current only) · drag to pan · toolbar Home resets the view.
@@ -168,9 +318,16 @@ Shift = current only) · drag to pan · toolbar Home resets the view.
 
 ## Filtering
 
-All three steps take the same optional preprocessing: a zero-phase Bessel
-low-pass (Bessel for its flat group delay, so event shape and timing survive)
-applied at the native sampling rate, *then* decimation to a target rate.
+Every step takes the same preprocessing: a zero-phase Bessel low-pass (Bessel
+for its flat group delay, so event shape and timing survive) applied at the
+native sampling rate, *then* decimation to a target rate.
+
+One asymmetry to know about. `optimize`, `run` and `check` are opt-**in** —
+nothing happens without `--filter`. `deconvolve` filters **by default** at
+3 kHz / 10 kHz and takes `--no-filter` to opt out, matching the defaults in
+`preprocess.py`. In `launch.py` a single checkbox covers both conventions and
+the right flag is emitted for whichever step you picked; picking `deconvolve`
+pre-ticks it, so launching it from the window matches running it by hand.
 
 ```bash
 python -m minianalysis run rec.abf --filter --cutoff-hz 3000 --target-rate-hz 10000
@@ -250,6 +407,9 @@ still be contaminated by it.
 
 ## How detection works
 
+This is the **classical** detector (`run`); for the deconvolution one see
+[its own section](#deconvolve).
+
 Per the tutorial's 6-step sequence, for every candidate peak:
 
 1. **Find a local maximum** — `scipy.signal.find_peaks` with a minimum spacing
@@ -296,6 +456,32 @@ print(f"{len(df)} events, {len(df) / abf.sweepLengthSec:.2f} Hz, "
       f"mean amplitude {df.amplitude.mean():.1f} pA")
 ```
 
+`minianalysis.deconvolve` is the same — numpy/scipy only, no Qt — and returns
+the same `Event` objects, so `events_frame` and everything downstream of it
+work unchanged:
+
+```python
+from minianalysis.deconvolve import (DeconvParams, detect_events_deconv,
+                                     noise_sd)
+
+dt = 1 / abf.dataRate
+sigma = noise_sd(abf.sweepY, dt)              # from the event-free side
+events, diag = detect_events_deconv(
+    None, abf.sweepY, dt,
+    DeconvParams(min_amp_pa=4 * sigma),        # 4-sigma detection limit, hard
+    return_diagnostics=True)
+
+print(f"kernel {diag['kernel'].size * dt * 1e3:.1f} ms "
+      f"({diag['kernel_source']}, {diag['n_isolated']} isolated events)")
+print(f"{diag['n_candidates']} candidates -> {len(events)} after cleanup")
+```
+
+`diag` also carries the deconvolved trace (`deconv`), its noise SD, and the
+tracked baseline, which is what you want for plotting or for deciding whether
+a threshold is sensible on a given cell. The detector's own scoring helpers
+(`_synth`, `score`) are importable too, if you want to benchmark a change
+against planted events.
+
 The analysis functions are importable the same way: `column_statistics`,
 `frequency_histogram`, `cumulative_histogram`, `running_average`,
 `autocorrelation_histogram`, `cross_correlation_histogram`,
@@ -307,20 +493,27 @@ The analysis functions are importable the same way: `column_statistics`,
 ## Layout
 
 ```
-optimize_params.py      run_detection.py     check_events.py     launch.py
+optimize_params.py   run_detection.py   detect_deconv.py   check_events.py   launch.py
    └─ thin wrappers, so each step is runnable as a plain script from the repo root
 
 minianalysis/
-    core.py         the detector + the analysis functions (no matplotlib, no Qt)
+    core.py         the classical detector + the analysis functions (no matplotlib, no Qt)
+    deconvolve.py   the deconvolution detector + its benchmark (no Qt)
     run.py          the batch run: parameter dialog, detection, CSV/sidecar/plot output
     optimize.py     the live three-panel parameter optimizer
-    check.py        the click-to-verify + accept/reject window
-    preprocess.py   Bessel low-pass + downsample, shared by all three
+    check.py        the click-to-verify + accept/reject window, for either detector
+    preprocess.py   Bessel low-pass + downsample, shared by every step
+    launch.py       the front door: pick a step, run it, then review what it found
     gui_utils.py    dialog-field helpers, GUI exception guard
     style.py        plot/GUI color tokens
     cli.py          `python -m minianalysis <command>` dispatch
 
-tests/              synthetic-trace tests: run `pytest` from the repo root
+tests/
+    test_core.py            the classical detector, on planted synthetic events
+    test_tools.py           optimize/check math agrees with detect_events exactly
+    test_deconvolve.py      the deconvolution detector, incl. overlap and kernel estimation
+    test_review_sources.py  reviewing either detector without their files colliding
+    test_launch_steps.py    the launcher's argv building and auto-check follow-up
 ```
 
 ## Tests
@@ -330,12 +523,29 @@ pip install pytest
 pytest
 ```
 
-The suite plants events of known amplitude, tau and timing in a synthetic trace
-and checks the detector recovers them, that each threshold and search window
-rejects what it should, that the two GUI tools' duplicated per-candidate math
-still agrees with `detect_events` exactly, and that an event survives the round
-trip out to CSV and back without moving. The GUI tests need no display —
-they only exercise the math, and skip entirely if PyQt5 isn't installed.
+82 tests. The suite plants events of known amplitude, tau and timing in a
+synthetic trace and checks each detector recovers them, that every threshold
+and search window rejects what it should, that the two GUI tools' duplicated
+per-candidate math still agrees with `detect_events` exactly, and that an event
+survives the round trip out to CSV and back without moving.
+
+For the deconvolution detector it also checks the cases the classical suite
+doesn't cover: two events 2 ms apart (inside the classical detector's own
+search window, so it merges them and this one shouldn't), that performance
+holds across decay τ without being told τ, that drift doesn't change the
+result, and that `noise_sd` doesn't collapse on a filtered trace the way a
+`diff`-based estimate does.
+
+For the reviewer and launcher it checks that no filename is shared between the
+detectors, that a foreign params sidecar loads without raising, that the
+checker opens after a detection run **only** on exit code 0 with an events CSV
+actually on disk, and that `deconvolve` gets `--no-filter` where the other
+steps get `--filter`. One test opens the real launcher dialog, because the
+argv-level tests all passed while a stale tuple unpack in the dialog itself was
+broken.
+
+The GUI tests need no display: they drive Qt through its offscreen platform and
+skip entirely if PyQt5 isn't installed.
 
 ## Credit
 
