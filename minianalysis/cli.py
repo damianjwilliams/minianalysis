@@ -24,6 +24,8 @@ COMMANDS = {
     "launch": "Pop up a window to pick a recording and a step, then run it",
     "optimize": "Tune detection parameters live: edit a value, click a peak, see it measured",
     "run": "Detect every event in a recording and write the events CSV + params sidecar + plot",
+    "deconvolve": "Detect events by deconvolution instead of thresholding -- separates "
+                  "overlapping events and does not fragment decay tails (see --benchmark)",
     "check": "Click a detected event to see the windows/thresholds behind it; accept or reject it",
     "preprocess": "Bessel low-pass filter + downsample a trace on its own, checking the ABF "
                   "header's own hardware filter setting first",
